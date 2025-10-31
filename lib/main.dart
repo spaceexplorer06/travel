@@ -1197,7 +1197,7 @@ class _AiPlannerPageState extends State<AiPlannerPage> {
     });
     _scrollToBottom();
 
-    final String url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=$_apiKey';
+    final String url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=$_apiKey';
     final headers = {'Content-Type': 'application/json'};
     final body = jsonEncode({
       'contents': [
