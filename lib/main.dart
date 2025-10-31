@@ -519,7 +519,7 @@ class _AppShellState extends State<AppShell> {
     _pages = <Widget>[
       HomePage(onProfileTap: () => _onItemTapped(3)),
       const MyTripsPage(),
-      const AiPlannerPage(),
+      AiPlannerPage(onGoHome: () => _onItemTapped(0)), // Pass the callback
       const ProfilePage(),
     ];
   }
@@ -609,7 +609,7 @@ class _HomePageState extends State<HomePage> {
   }
   
   Future<void> _loadInitialData() async {
-    // Run both tasks in parallel, don't wait for location to fetch destinations
+    // Run both tasks in parallel
     _getCurrentLocation(); 
     await _fetchDestinations();
   }
@@ -660,20 +660,27 @@ class _HomePageState extends State<HomePage> {
     });
   }
 
-
+  // --- UPDATED Location Function ---
   Future<void> _getCurrentLocation() async {
      bool serviceEnabled;
     LocationPermission permission;
 
     serviceEnabled = await Geolocator.isLocationServiceEnabled();
     if (!serviceEnabled) {
-      if(mounted) setState(() => _currentAddress = 'Location services disabled');
+      if(mounted) {
+        setState(() => _currentAddress = 'Location services disabled');
+        // Guide user to settings
+        _showOpenSettingsDialog(
+          'Location Services Disabled', 
+          'Please turn on your location services to get your current location.'
+        );
+      }
       return;
     }
 
     permission = await Geolocator.checkPermission();
     if (permission == LocationPermission.denied) {
-      permission = await Geolocator.requestPermission();
+      permission = await Geolocator.requestPermission(); // This is the prompt
       if (permission == LocationPermission.denied) {
         if(mounted) setState(() => _currentAddress = 'Location permission denied');
         return;
@@ -681,12 +688,20 @@ class _HomePageState extends State<HomePage> {
     }
 
     if (permission == LocationPermission.deniedForever) {
-      if(mounted) setState(() => _currentAddress = 'Location permanently denied');
+      if(mounted) {
+        setState(() => _currentAddress = 'Location permanently denied');
+        // Guide user to app settings
+        _showOpenSettingsDialog(
+          'Location Permission Required', 
+          'Location permission has been permanently denied. Please go to your app settings to enable it.'
+        );
+      }
       return;
     }
 
+    // If we get here, permission is granted
     try {
-      // Added a time limit to prevent the function from hanging indefinitely
+      if(mounted) setState(() => _currentAddress = 'Fetching location...');
       Position position = await Geolocator.getCurrentPosition(
         desiredAccuracy: LocationAccuracy.medium,
         timeLimit: const Duration(seconds: 10)
@@ -703,6 +718,41 @@ class _HomePageState extends State<HomePage> {
       print(e);
       if(mounted) setState(() => _currentAddress = 'Error fetching location');
     }
+  }
+  
+  // --- NEW Function to show a dialog ---
+  Future<void> _showOpenSettingsDialog(String title, String content) async {
+    // Check if the dialog is already open
+    if (!mounted) return;
+    
+    return showDialog<void>(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: Text(title),
+          content: Text(content),
+          actions: <Widget>[
+            TextButton(
+              child: const Text('Cancel'),
+              onPressed: () {
+                Navigator.of(context).pop();
+              },
+            ),
+            TextButton(
+              child: const Text('Open Settings'),
+              onPressed: () {
+                if (title.contains("Services")) {
+                  Geolocator.openLocationSettings();
+                } else {
+                  Geolocator.openAppSettings();
+                }
+                Navigator.of(context).pop();
+              },
+            ),
+          ],
+        );
+      },
+    );
   }
 
   @override
@@ -1039,18 +1089,39 @@ class ProfilePage extends StatelessWidget {
                     title: 'Help & Support',
                     onTap: () {},
                   ),
-                  ProfileMenuItem(
-                    icon: Icons.logout,
-                    title: 'Logout',
-                    onTap: () async {
-                      await supabase.auth.signOut();
-                      // The AuthGate is listening at the root, so it will
-                      // automatically navigate to the AuthPage.
-                      // We just need to pop all screens on top of it.
-                      Navigator.of(context).popUntil((route) => route.isFirst);
-                    },
-                    textColor: Colors.red,
-                  ),
+                  // Inside ProfilePage, in your ListView:
+
+ProfileMenuItem(
+  icon: Icons.logout,
+  title: 'Logout',
+  onTap: () async {
+    try {
+      // 1. Sign out from Supabase
+      await supabase.auth.signOut();
+
+      // 2. IMPORTANT: Check if the context is still valid after the await
+      if (!context.mounted) return; 
+
+      // 3. Force navigation back to the AuthGate and remove ALL routes.
+      // This is more reliable than popUntil.
+      Navigator.of(context).pushAndRemoveUntil(
+        MaterialPageRoute(builder: (context) => const AuthGate()),
+        (route) => false, // This predicate removes all routes behind it.
+      );
+
+    } catch (e) {
+      // 4. Show an error if sign-out fails for some reason
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error signing out: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  },
+  textColor: Colors.red,
+),
                 ],
               ),
             ),
@@ -1168,7 +1239,8 @@ class _MyTripsPageState extends State<MyTripsPage> {
 
 // 5. AI Planner Page
 class AiPlannerPage extends StatefulWidget {
-  const AiPlannerPage({Key? key}) : super(key: key);
+  final VoidCallback onGoHome;
+  const AiPlannerPage({Key? key, required this.onGoHome}) : super(key: key);
 
   @override
   _AiPlannerPageState createState() => _AiPlannerPageState();
@@ -1190,12 +1262,38 @@ class _AiPlannerPageState extends State<AiPlannerPage> {
     _messages.add(const AiGreetingBubble());
   }
   
+  // --- NEW: Keyword checking function ---
+  bool _checkForItineraryKeywords(String prompt) {
+    final keywords = ['plan', 'itinerary', 'trip', 'book', 'go to', 'show me', 'vacation', 'holiday'];
+    final lowerPrompt = prompt.toLowerCase();
+    for (final keyword in keywords) {
+      if (lowerPrompt.contains(keyword)) {
+        return true;
+      }
+    }
+    return false;
+  }
+  
   Future<void> _getAiResponse(String prompt) async {
     setState(() {
-      _lastItinerary = '';
+      _lastItinerary = ''; // Clear previous itinerary
       _messages.add(const AiTypingBubble());
     });
     _scrollToBottom();
+
+    // --- NEW: Intent Detection & Dynamic Prompting ---
+    final isItineraryRequest = _checkForItineraryKeywords(prompt);
+    String systemPrompt;
+    bool showBookButton = false;
+
+    if (isItineraryRequest) {
+      systemPrompt = 'You are a travel planning assistant named Nivi. Generate a concise, exciting, and bookable travel itinerary based on the following user request. For the destination, make up a suitable title (e.g., "Romantic Bali Getaway"). For each day, provide a title and a short description. Also, include a dynamic price estimate for the whole trip and suggest 2-3 contextual upsells. Format the entire response nicely, starting with the destination title. User request: "$prompt"';
+      showBookButton = true;
+    } else {
+      systemPrompt = 'You are a friendly and conversational travel assistant named Nivi. Answer the user\'s question concisely and helpfully. Do not generate an itinerary unless explicitly asked. User question: "$prompt"';
+      showBookButton = false;
+    }
+    // --- End of new logic ---
 
     final String url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=$_apiKey';
     final headers = {'Content-Type': 'application/json'};
@@ -1203,7 +1301,7 @@ class _AiPlannerPageState extends State<AiPlannerPage> {
       'contents': [
         {
           'parts': [
-            {'text': 'You are a travel planning assistant named Nivi. Generate a concise, exciting, and bookable travel itinerary based on the following user request. For the destination, make up a suitable title (e.g., "Romantic Bali Getaway"). For each day, provide a title and a short description. Also, include a dynamic price estimate for the whole trip and suggest 2-3 contextual upsells. Format the entire response nicely, starting with the destination title. User request: "$prompt"'}
+            {'text': systemPrompt} // Use the new dynamic prompt
           ]
         }
       ]
@@ -1216,18 +1314,21 @@ class _AiPlannerPageState extends State<AiPlannerPage> {
         body: body,
       );
 
-      setState(() { _messages.removeLast(); });
+      setState(() { _messages.removeLast(); }); // Remove typing indicator
 
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
         final generatedText = data['candidates'][0]['content']['parts'][0]['text'];
         
         setState(() {
-          _lastItinerary = generatedText;
-          _lastDestination = generatedText.split('\n').first; 
+          if (showBookButton) {
+            _lastItinerary = generatedText;
+            _lastDestination = generatedText.split('\n').first; 
+          }
           _messages.add(AiMessageBubble(
             text: generatedText, 
-            onBookNow: _showBookingConfirmation,
+            // Only pass the callback if it's an itinerary
+            onBookNow: showBookButton ? _showBookingConfirmation : null, 
           ));
         });
       } else {
@@ -1339,6 +1440,10 @@ class _AiPlannerPageState extends State<AiPlannerPage> {
     return Scaffold(
       backgroundColor: Colors.grey[100],
       appBar: AppBar(
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back),
+          onPressed: widget.onGoHome, // Use the callback
+        ),
         title: const Text('AI Trip Planner'),
         centerTitle: true,
         backgroundColor: Colors.white,
